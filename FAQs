@@ -1,0 +1,79 @@
+FAQs/Instructions
+
+1. Do we need to wake up a thread in the schedule function that was put to sleep using qthread_usleep only if the there are no runnable threads in the active queue?
+
+Correct. If the user schedules a thread to wake up in 100 microseconds, then has a couple of threads use up 1000 microseconds of CPU before blocking, it’s the user’s problem.
+
+2. Does waking up a sleep thread that was put to sleep using qthread_usleep mean we append the waiting thread to the active queue or do we just point the current qthread pointer to the waiting thread?
+
+Since you only check the set of sleeping threads when the active queue is empty, it’s going to get run immediately. Depending on your code structure that may mean pointing current at it and switching, or putting it on the active queue and running your schedule loop one more time, at which point it will get pulled off.
+
+DO NOT implement qthread_usleep until you have everything else working. Do not write any code for it. If you don’t have yield, join, and mutexes working yet, then delete any code you have that is related to qthread_usleep.
+
+Your thread structure has a field for the saved stack pointer, let’s call it saved_sp. When switching away from a thread you have to pass the address of that field, in that thread structure, as the first argument to the switch_stack function.
+
+If you get an assertion that looks like this:
+
+Assertion `*(unsigned long*)new_sp == 0xA5A5A5A5A5A5A5A5' failed
+it means that the stack pointer you passed in did not point to a valid stack - in other words, it’s not a pointer returned by setup_stack or a value stored in th->saved_sp by switch_thread(&th1->saved_sp, th2->saved_sp)
+
+In six locations in your code you’re going to have to put the current thread somewhere and then select a thread to switch to:
+
+yield - somewhere = active queue
+exit - somewhere = nowhere
+join - somewhere = “waiter” link on thread struct of joined thread
+mutex - somewhere = queue in mutex struct
+cond wait - somewhere = queue in cond struct
+usleep - somewhere = set of threads waiting to wake up
+One way to structure this is with a function schedule(void), which gets called with current pointing to the currently-running thread. The function (a) copies current to a temporary, (b) selects a new thread for current to point to, then (c) switches via switch_thread(&tmp->saved_sp, current->saved_sp)
+
+So you queue the current thread somewhere, leaving current pointing to it, then call schedule. Then when you’ve gotten everything else working, when you implement qthread_usleep you’ll handle the case where there’s no thread on the active list, but there are sleeping threads that you have to wait for.
+
+Q. Me and my partner are still confused about the qthread_int function. We allocated a thread structure for the main thread, but what do we set the stack pointer and stack to? If we set them to null then it will fail to switch, any ideas?
+
+Don’t set it to anything.
+
+When you switch away from it, switch_thread will set the saved_sp field, which gets used when you switch back.
+
+In order to set that field correctly, you have to pass the address of saved_sp as the first argument to switch_thread
+
+Question: should the thread being called by join be added to the active queue?
+
+No, the idea is that the thread will go to sleep until the joined thread exits. If you put it back on the active queue it won’t go to sleep.
+
+the function doesn’t return. It will return after it gets put back on the active queue by the joined thread’s call to exit
+
+it won’t have the return value from the thread it called join on. Am I missing something here? You’ll need to save that value in the thread structure.
+
+What if the thread being called into join needs a lock or something? If there’s a deadlock in the application logic we can’t do anything about it. The test application doesn’t have any deadlocks. (or at least it doesn’t if all the thread functions are written correctly - all bets are off if they’re buggy)
+
+    Stack: The starter code in qthread.c says `` switch_thread and `setup_stack are “prototypes for stack.c and switch.s”. Should we be creating a stack.c to implement these?
+    No. The two functions are implemented in switch.S, and this just tells the compiler about them and gives the arguments types which match how they’re used in the assembly code.
+    
+    Should our qthread structure include a function for the thread to run? The README states it needs 3 attributes: next ptr, saved stack pointer, (Should this be an integer?) and timing information (should this be long int for the sleep microseconds?). At some point the thread is going to have to DO something though, and isn’t that a function?
+    Stack and saved stack should be void *. The function argument gets saved on the stack by setup_stack and gets called when you switch to the thread the first time. (note that you need to create a wrapper function which calls the actual thread function, so you can call qthread_exit if the thread function returns)
+    
+    The qthread *  current is a global variable, along with the qthread_queue active, correct?
+    Yes
+    
+    “set of threads waiting for a timeout”: the README says that this can just be an array. This is another global, correct? And to be clear, these are all the threads that have been created but are not in the `active queue and have not exited, correct?
+    Yes, it’s global. No, it’s the threads that are waiting in qthread_usleep - threads waiting on condvars and mutexes can be queued on the specific condvars and mutexes they’re waiting on.
+    
+    We don’t need to further define typedef void (*f_2arg_t)(void*, void*) do we? Or its single argument function counterpart? They look defined to me I just wanted to make sure.
+    Correct
+    
+    Does the qthread_cond struct include what condition the threads are waiting for? Or is it just the queue of threads? Where is the condition defined? In the examples in class, the condition has been in a while loop. Is that the same idea here: once some condition defined outside of qthread.c in a while loop has been met, then we would run the signal? When do we run broadcast instead of signal?
+    The name “condition variable” is a poor one. It’s a wait queue, and you wait on it until another thread wakes you up with signal or broadcast. The actual boolean “condition” is part of the application logic, as is the choice of signal vs broadcast.
+    
+    Does qthread_create call pthread_create to create a thread? Should the new thread be immediately added to the active queue?
+    No, qthread_create is a replacement for pthread_create. And yes, the new thread should be added to the active queue.
+    
+    What is qthread_init supposed to do? The README says it “initializes your thread implementation” - is this initializing the global variables? Is there anything else it should initialize, like running the setup_stack function?
+    It needs to create a struct qthread for the “main” thread - i.e. the one running at the start, with an OS-provided stack - and point current at that structure. That way when you switch away from the main thread there’s a way to switch back. (and no, don’t allocate a stack for it - it already has one)
+    
+    What does it mean for a thread to be “blocked in qthread_usleep? Does that mean that the thread’s timing information attribute is causing it to sleep? Is this thread in "the set of threads waiting for a timeout”?
+    It means that the thread called qthread_usleep(N), which will cause it to sleep for N microseconds, allowing other threads to run during that time. And yes, that’s the same as “waiting for a timeout”.
+    
+    The only functions in switch.s that we need to worry about are switch_thread and setup_stack, correct? And they interact directly with each other, and other than switch_thread in our scheduler when we want to switch threads, we don’t need to use anything in switch.c, correct?
+    Those are the only two that you will use. (there are a couple of helper functions that could probably be eliminated if I was better at ARM assembly) They “interact” in the sense that setup_stack sets a stack so that when you switch to it, it will begin executing the first instruction of the provided function.
+    
